@@ -1,0 +1,32 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              gcc-multilib libc6-dev-i386 gcc-arm-none-eabi libnewlib-arm-none-eabi \
+              qemu-user libmgba-dev python3-pil
+      - run: make fetch
+      - name: Host reference vs ARM7 under qemu
+        run: make test
+      - name: Optimized build vs reference
+        run: make opt-test
+      - name: GBA ROMs in mGBA, baseline and optimized
+        run: make gba-test gba-opt-test
+      - name: Property and equivalence tests
+        run: make props equiv props-arm equiv-arm
+      - name: Negative controls (x87, -ffast-math; the log should show FAIL)
+        run: make controls
+      - name: Skeleton vs the game's float matrices
+        run: make skeleton-check
+      - name: Demo physics vs reference, frame-rate tour
+        run: make demo demo-check
+      - name: ROM import readers vs the decomp's tools
+        run: make import-check

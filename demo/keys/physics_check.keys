@@ -1,0 +1,34 @@
+# Bob-omb Battlefield, no level switch, no deaths: run, turn, jumps, long jump,
+# dive and rollout, slide kick, ground pound, backflip, camera rotation (the
+# camera yaw feeds Mario's stick direction), standing still.
+60 300 ^
+120 124 A
+180 400 ^>
+250 254 A
+262 266 A
+300 330 L>
+330 520 ^
+400 404 R
+404 410 RA
+520 600 <
+560 563 B
+575 579 A
+600 700 ^
+640 645 R
+645 650 RB
+700 760 v
+740 744 A
+760 800 L<
+800 900 ^
+840 844 A
+852 856 R
+900 960 R
+930 936 RA
+960 1100 ^<
+1000 1004 A
+1012 1016 A
+1024 1028 A
+1100 1180 L^
+1180 1400 ^
+1260 1264 B
+1400 1500

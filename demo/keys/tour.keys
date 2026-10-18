@@ -1,0 +1,46 @@
+# Preview tour (GBA frames at 60 Hz; levels take ~2 s to load)
+# Bob-omb Battlefield: run, triple jump, turn, long jump, look around
+140 520 ^
+200 203 A
+222 226 A
+246 252 A
+330 520 ^>
+430 436 R
+436 442 RA
+520 560 L<
+560 760 ^
+600 603 A
+620 700 ^<
+700 704 R
+704 709 RB
+760 820 v
+790 793 A
+820 1000 ^>
+880 886 R
+886 890 RA
+1000 1003 S
+# Whomp's Fortress
+1120 1400 ^
+1180 1183 A
+1200 1203 A
+1250 1400 ^<
+1300 1303 A
+1400 1460 L>
+1460 1640 ^
+1520 1525 B
+1640 1643 S
+# Cool, Cool Mountain
+1780 2100 ^
+1850 2100 ^>
+1920 1923 A
+2000 2010 R
+2100 2240 ^<
+2160 2163 A
+2240 2243 S
+# Bowser in the Dark World
+2380 2700 ^
+2440 2443 A
+2520 2700 ^>
+2580 2584 A
+2700 2840 ^<
+2760 2764 A

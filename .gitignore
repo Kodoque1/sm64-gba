@@ -1,0 +1,8 @@
+build/
+sm64/
+__pycache__/
+# ROMs and anything converted from them stay local
+*.z64
+*.v64
+*.n64
+*.gba
