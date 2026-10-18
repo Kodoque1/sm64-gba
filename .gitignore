@@ -1,5 +1,6 @@
 build/
 sm64/
+ext/
 __pycache__/
 # ROMs and anything converted from them stay local
 *.z64

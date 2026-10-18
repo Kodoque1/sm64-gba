@@ -3,39 +3,47 @@
 
 Sets the 12-byte title, the fixed byte 0x96 at 0xB2 and the complement
 checksum at 0xBD. The Nintendo logo area is left zeroed: it isn't in this
-repository. A real GBA's BIOS refuses to boot without it, so for hardware
-either run devkitPro's gbafix on the ROM, or pass --logo-from with a GBA ROM
-you have, to copy the logo from its header.
+repository. A real GBA's BIOS refuses to boot without it; for the demo ROMs
+devkitPro's gbafix writes it (see the Makefile).
+
+  fix_gba_header.py rom.gba TITLE
+  fix_gba_header.py rom.gba --check   the header a GBA's BIOS checks: logo,
+                                      fixed byte and complement checksum
 """
+import hashlib
 import sys
 
 LOGO = slice(0x04, 0xA0)
+# SHA-256 of the logo bytes as gbafix writes them (the logo itself stays out
+# of this repository)
+LOGO_SHA256 = "08a0153cfd6b0ea54b938f7d209933fa849da0d56f5a34c481060c9ff2fad818"
 
 
 def complement(rom):
     return (-(sum(rom[0xA0:0xBD]) + 0x19)) & 0xFF
 
 
-def read_logo(path):
-    src = open(path, "rb").read(0xC0)
-    if len(src) < 0xC0 or src[0xB2] != 0x96 or src[0xBD] != complement(src):
-        sys.exit(f"{path}: not a GBA ROM with a valid header")
-    if not any(src[LOGO]):
-        sys.exit(f"{path}: its logo area is empty")
-    return src[LOGO]
+def check(path):
+    rom = open(path, "rb").read(0xC0)
+    errors = []
+    if hashlib.sha256(rom[LOGO]).hexdigest() != LOGO_SHA256:
+        errors.append("the Nintendo logo is missing or wrong")
+    if rom[0xB2] != 0x96:
+        errors.append("byte 0xB2 isn't 0x96")
+    if rom[0xBD] != complement(rom):
+        errors.append("the complement checksum is wrong")
+    if errors:
+        sys.exit(f"{path}: a GBA won't boot it: " + "; ".join(errors))
+    print(f"  {path}: header OK for a GBA (logo, fixed byte, checksum)")
 
 
 def main():
-    args = sys.argv[1:]
-    logo = None
-    if "--logo-from" in args:
-        i = args.index("--logo-from")
-        logo = read_logo(args[i + 1])
-        del args[i:i + 2]
-    path, title = args[0], args[1] if len(args) > 1 else "SM64PARITY"
+    path = sys.argv[1]
+    if sys.argv[2:] == ["--check"]:
+        check(path)
+        return
+    title = sys.argv[2] if len(sys.argv) > 2 else "SM64PARITY"
     rom = bytearray(open(path, "rb").read())
-    if logo is not None:
-        rom[LOGO] = logo
     rom[0xA0:0xAC] = title.upper().encode("ascii")[:12].ljust(12, b"\0")
     rom[0xAC:0xB0] = b"SMPE"
     rom[0xB0:0xB2] = b"01"

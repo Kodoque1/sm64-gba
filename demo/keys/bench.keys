@@ -1,0 +1,68 @@
+# The bench tour: demo/keys/tour.keys with frames counted in game frames
+# (30 Hz, level loads take none), so every platform plays the same frames.
+# Made from the keys the demo read on each frame of the tour in mGBA.
+# Bob-omb Battlefield
+4 33 ^
+34 35 ^A
+36 44 ^
+45 46 ^A
+47 56 ^
+57 59 ^A
+60 98 ^
+99 148 ^>
+149 151 ^>R
+152 154 ^>RA
+155 193 ^>
+194 213 L<
+214 233 ^
+234 235 ^A
+236 243 ^
+244 283 ^<
+284 285 ^R
+286 288 ^RB
+289 313 ^
+314 328 v
+329 330 vA
+331 343 v
+344 373 ^>
+374 376 ^>R
+377 378 ^>RA
+379 433 ^>
+# Whomp's Fortress
+434 434 S
+456 485 ^
+486 487 ^A
+488 495 ^
+496 497 ^A
+498 520 ^
+521 545 ^<
+546 547 ^<A
+548 595 ^<
+596 625 L>
+626 655 ^
+656 658 ^B
+659 715 ^
+# Cool, Cool Mountain
+716 716 S
+721 755 ^
+756 790 ^>
+791 792 ^>A
+793 828 ^>
+829 833 ^>R
+834 876 ^>
+877 906 ^<
+907 908 ^<A
+909 946 ^<
+# Bowser in the Dark World
+947 947 S
+979 1008 ^
+1009 1010 ^A
+1011 1048 ^
+1049 1078 ^>
+1079 1081 ^>A
+1082 1138 ^>
+1139 1139 ^<>
+1140 1168 ^<
+1169 1171 ^<A
+1172 1209 ^<
+end 1228

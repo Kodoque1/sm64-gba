@@ -18,6 +18,10 @@
  *   --keys FILE       button script: lines "first last KEYS", frames inclusive,
  *                     KEYS from A B L R S(start) E(select) < > ^ v
  *   --capture DIR K   write every K-th frame as DIR/NNNNNN.ppm
+ *   --video-hash FILE one line per frame: FNV-1a hash of the picture
+ *   --dirty SEED      fill memory with pseudo-random bytes before boot
+ *   --sram FILE       the bench ROM: run until its record in save RAM is
+ *                     complete (demo/bench.h), then write the save RAM to FILE
  */
 #include <mgba/core/core.h>
 #include <mgba/core/config.h>
@@ -28,6 +32,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "bench.h"
 
 static int sDone;
 
@@ -178,6 +184,68 @@ static void write_ppm(const char *dir, long frame, const color_t *video, unsigne
     fclose(f);
 }
 
+/* ---------- power-on memory ----------
+ * A GBA powers on with whatever its RAM holds; emulators zero it. Fills work
+ * RAM, IWRAM (except its top 512 bytes: stacks and the IRQ vector, which the
+ * BIOS sets up), palette, VRAM and OAM with pseudo-random words. */
+static void fill_dirty(struct mCore *core, unsigned seed) {
+    static const struct { uint32_t base, size; } kRegions[] = {
+        { 0x02000000, 0x40000 }, { 0x03000000, 0x7E00 }, { 0x05000000, 0x400 },
+        { 0x06000000, 0x18000 }, { 0x07000000, 0x400 },
+    };
+    uint32_t x = seed * 2654435761u + 1;
+    unsigned r, i, wrong = 0;
+    for (r = 0; r < sizeof(kRegions) / sizeof(kRegions[0]); r++) {
+        for (i = 0; i < kRegions[r].size; i += 4) {
+            x ^= x << 13; /* xorshift32 */
+            x ^= x >> 17;
+            x ^= x << 5;
+            core->rawWrite32(core, kRegions[r].base + i, -1, x);
+            wrong += (uint32_t) core->rawRead32(core, kRegions[r].base + i, -1) != x;
+        }
+    }
+    if (wrong) {
+        fprintf(stderr, "mgba_runner: --dirty: %u words didn't take\n", wrong);
+        exit(2);
+    }
+}
+
+/* ---------- the bench's save RAM ---------- */
+
+/* Read through the bus (savedataClone doesn't survive the distro library's
+ * struct layout). */
+static int bench_done(struct mCore *core, const char *path) {
+    static uint8_t sram[32768];
+    unsigned i;
+    for (i = 0; i < sizeof(sram); i++) {
+        sram[i] = (uint8_t) core->rawRead8(core, 0x0E000000 + i, -1);
+    }
+    if (path != NULL) {
+        FILE *f = fopen(path, "wb");
+        if (f == NULL || fwrite(sram, 1, sizeof(sram), f) != sizeof(sram)) {
+            fprintf(stderr, "mgba_runner: cannot write %s\n", path);
+            exit(2);
+        }
+        fclose(f);
+    }
+    return sram[BENCH_STATE_OFS] == BENCH_DONE;
+}
+
+/* FNV-1a over the picture's RGB (the top byte of each pixel isn't shown) */
+static uint32_t video_hash(const color_t *video, unsigned w, unsigned h) {
+    size_t i, n = (size_t) w * h;
+    uint32_t hash = 2166136261u;
+    for (i = 0; i < n; i++) {
+        uint32_t c = (uint32_t) video[i];
+        unsigned k;
+        for (k = 0; k < 24; k += 8) {
+            hash ^= (c >> k) & 0xFF;
+            hash *= 16777619u;
+        }
+    }
+    return hash;
+}
+
 int main(int argc, char **argv) {
     static struct mLogger logger = { .log = on_log };
     struct mCore *core;
@@ -187,10 +255,13 @@ int main(int argc, char **argv) {
     long frames = 0;
     const char *captureDir = NULL;
     long captureEvery = 1;
+    const char *sramPath = NULL;
+    FILE *hashFile = NULL;
+    long dirtySeed = -1;
     int i;
 
     if (argc < 2) {
-        fprintf(stderr, "usage: %s rom.gba [max_gba_frames] [--frames N] [--keys F] [--capture DIR K]\n", argv[0]);
+        fprintf(stderr, "usage: %s rom.gba [max_gba_frames] [--frames N] [--keys F] [--capture DIR K]\n                        [--video-hash F] [--dirty SEED] [--sram F]\n", argv[0]);
         return 2;
     }
     for (i = 2; i < argc; i++) {
@@ -201,6 +272,16 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--capture") == 0 && i + 2 < argc) {
             captureDir = argv[++i];
             captureEvery = atol(argv[++i]);
+        } else if (strcmp(argv[i], "--video-hash") == 0 && i + 1 < argc) {
+            hashFile = fopen(argv[++i], "w");
+            if (hashFile == NULL) {
+                fprintf(stderr, "mgba_runner: cannot write %s\n", argv[i]);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--dirty") == 0 && i + 1 < argc) {
+            dirtySeed = atol(argv[++i]);
+        } else if (strcmp(argv[i], "--sram") == 0 && i + 1 < argc) {
+            sramPath = argv[++i];
         } else {
             maxFrames = atol(argv[i]);
         }
@@ -227,6 +308,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     core->reset(core);
+    if (dirtySeed >= 0) {
+        fill_dirty(core, (unsigned) dirtySeed);
+    }
 
     if (getenv("MGBA_PROFILE") != NULL) {
         if (getenv("MGBA_PROFILE_PERIOD") != NULL) {
@@ -254,9 +338,21 @@ int main(int argc, char **argv) {
         if (captureDir != NULL && frames % captureEvery == 0) {
             write_ppm(captureDir, frames, video, width, height);
         }
+        if (hashFile != NULL) {
+            fprintf(hashFile, "%08x\n", video_hash(video, width, height));
+        }
         frames++;
+        if (sramPath != NULL && frames % 60 == 0
+            && core->rawRead8(core, 0x0E000000 + BENCH_STATE_OFS, -1) == BENCH_DONE) {
+            break;
+        }
     }
-    if (captureDir != NULL || sNumKeyRanges > 0) {
+    if (hashFile != NULL) {
+        fclose(hashFile);
+    }
+    if (sramPath != NULL) {
+        sDone = bench_done(core, sramPath);
+    } else if (captureDir != NULL || sNumKeyRanges > 0 || hashFile != NULL) {
         sDone = 1; /* demo runs end on the frame limit */
     }
 

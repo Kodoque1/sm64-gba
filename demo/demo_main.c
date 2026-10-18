@@ -28,12 +28,16 @@
 #ifdef DEMO_IMPORTED
 #include "import.h"
 #endif
+#ifdef DEMO_BENCH
+#include "bench.h"
+#endif
 
 void adjust_analog_stick(struct Controller *controller);
 void copy_mario_state_to_object(void);
 void mario_anim_render_step(struct Object *marioObj);
 void setup_dma_table_list(struct DmaHandlerList *list, void *srcAddr, void *buffer);
 void irq_handler(void);
+void fill_words(u32 *dst, u32 value, s32 count); /* irq.s */
 extern s32 gHarnessWarpRequest;
 extern const s16 gSinQ14[4096];
 
@@ -152,6 +156,18 @@ static void debug_line(const char *s) {
     DEBUG_STRING[i] = 0;
     REG_DEBUG_FLAGS = 0x100 | 3;
 }
+
+#ifdef DEMO_BENCH
+/* Cartridge save RAM: 8-bit bus, so byte stores only. */
+#define SRAM ((volatile u8 *) 0x0E000000)
+
+static void sram_put(u32 ofs, u32 value, u32 bytes) {
+    while (bytes--) {
+        SRAM[ofs++] = (u8) value;
+        value >>= 8;
+    }
+}
+#endif
 
 /* ---------- camera ---------- */
 
@@ -291,6 +307,9 @@ static void show_loading(s32 idx) {
 
 static void load_level(s32 idx) {
     const struct HarnessLevel *lvl = &gHarnessLevels[idx];
+#ifdef DEMO_BENCH
+    u32 v0 = gVBlankCount;
+#endif
 
     show_loading(idx);
     load_area_terrain(0, (TerrainData *) lvl->collision, NULL, NULL);
@@ -350,6 +369,9 @@ static void load_level(s32 idx) {
     render_set_palette(&kStyles[idx]);
 #endif
     spawn_mario();
+#ifdef DEMO_BENCH
+    sram_put(BENCH_LOADS_OFS + 2 * idx, gVBlankCount - v0, 2);
+#endif
 }
 
 /* The same per-frame sequence as the parity harness (src/harness.c). */
@@ -427,6 +449,117 @@ static void player_from_mario(struct RPlayer *p) {
     p->drawBody = 0; /* the animated mannequin sprites draw the body */
 }
 
+/* ---------- bench (make bench) ----------
+ * The bench ROM plays a fixed tour from a key script indexed by game frame
+ * (build/demo/bench_keys.c, from demo/keys/bench.keys), so every emulator
+ * and every GBA renders the same scene on the same frame, and records each
+ * frame in the cartridge's save RAM (demo/bench.h). */
+#ifdef DEMO_BENCH
+extern const u16 gBenchKeys[][3]; /* first frame, last frame, keys */
+extern const u32 gNumBenchKeys, gBenchFrames;
+extern const u8 __data_lma[], __data_start[], __data_end[];
+
+/* flash carts and emulators pick the save type by finding this string */
+__attribute__((used, aligned(4))) static const char kSaveType[] = "SRAM_V113";
+
+static u32 sBenchAt30;
+
+static u32 bench_keys(u32 frame) {
+    u32 keys = 0, i;
+    for (i = 0; i < gNumBenchKeys; i++) {
+        if (frame >= gBenchKeys[i][0] && frame <= gBenchKeys[i][1]) keys |= gBenchKeys[i][2];
+    }
+    return keys;
+}
+
+/* sum of the ROM image's words (.data's load copy is the last thing in it),
+ * so a report can tell which build made a .sav */
+static u32 rom_checksum(void) {
+    const u32 *p = (const u32 *) 0x08000000;
+    const u32 *end = (const u32 *) (__data_lma + (__data_end - __data_start));
+    u32 sum = 0;
+    while (p < end) sum += *p++;
+    return sum;
+}
+
+static void bench_start(void) {
+    u32 i;
+    for (i = 0; i < 8; i++) sram_put(i, (u8) BENCH_MAGIC[i], 1);
+    sram_put(8, BENCH_VERSION, 1);
+    sram_put(9, BENCH_RECORD, 1);
+    sram_put(BENCH_FRAMES_OFS, 0, 2);
+    sram_put(BENCH_STATE_OFS, BENCH_RUNNING, 1);
+    sram_put(BENCH_FLAGS_OFS, sDebug ? 1 : 0, 1);
+    sram_put(14, 0, 2);
+    sram_put(BENCH_CHECKSUM_OFS, rom_checksum(), 4);
+    for (i = BENCH_LOADS_OFS; i < BENCH_HEADER; i++) sram_put(i, 0, 1);
+}
+
+static u32 pos_hash(void) {
+    u32 h = 2166136261u, k, j;
+    for (k = 0; k < 3; k++) {
+        union { f32 f; u32 u; } b;
+        b.f = gMarioState->pos[k];
+        for (j = 0; j < 32; j += 8) {
+            h ^= (b.u >> j) & 0xFF;
+            h *= 16777619u;
+        }
+    }
+    return h;
+}
+
+static void bench_record(u32 frame, u32 vblanks, s32 quality, u32 physCycles, u32 renderCycles) {
+    u32 at = BENCH_HEADER + frame * BENCH_RECORD;
+    sram_put(at + 0, vblanks, 1);
+    sram_put(at + 1, (u32) quality | (u32) sLevel << 4, 1);
+    sram_put(at + 2, (u32) sLogRawX, 1);
+    sram_put(at + 3, (u32) sLogRawY, 1);
+    sram_put(at + 4, (u32) sLogButtons >> 8, 1);
+    sram_put(at + 5, 0, 1);
+    sram_put(at + 6, (u32) sLogCamYaw, 2);
+    sram_put(at + 8, physCycles, 3);
+    sram_put(at + 11, renderCycles, 3);
+    sram_put(at + 14, 0, 2);
+    sram_put(at + 16, pos_hash(), 4);
+    sram_put(BENCH_FRAMES_OFS, frame + 1, 2);
+    if (vblanks == 2) sBenchAt30++;
+}
+
+/* The end: the result on a black screen, and the record marked complete. */
+static void bench_done(u32 frames) {
+    char line[32], *p;
+    const char *t;
+    u32 permille = sBenchAt30 * 1000 / frames;
+    sram_put(BENCH_STATE_OFS, BENCH_DONE, 1);
+    while (REG_VCOUNT >= 160) {}
+    while (REG_VCOUNT < 160) {}
+    PAL_BG[0] = 0;
+    REG_DISPCNT = DCNT_MODE4 | DCNT_OBJ | DCNT_OBJ_1D;
+    mannequin_hide();
+    mannequin_commit();
+    hud_clear();
+    hud_text(8, 8, "BENCH DONE");
+    p = hud_fmt_int(line, (s32) frames, 1);
+    t = " FRAMES";
+    while (*t) *p++ = *t++;
+    *p = 0;
+    hud_text(8, 20, line);
+    p = hud_fmt_int(line, (s32) (permille / 10), 1);
+    *p++ = '.';
+    p = hud_fmt_int(p, (s32) (permille % 10), 1);
+    t = "% AT 30 FPS";
+    while (*t) *p++ = *t++;
+    *p = 0;
+    hud_text(8, 32, line);
+    hud_text(8, 44, "RESULTS IN SAVE RAM");
+    while (1) {
+        while (!(REG_DISPSTAT & 1)) {}
+        hud_commit();
+        while (REG_DISPSTAT & 1) {}
+    }
+}
+#endif
+
 /* ---------- main ---------- */
 
 int main(void) {
@@ -437,14 +570,24 @@ int main(void) {
     u32 windowMax = 0, windowCount = 0, goodWindows = 0, missed = 0;
     u32 fpsFlips = 0, fpsStart, fps = 30;
     u32 physCycles = 0, renderCycles = 0, mannequinCycles = 0, stackUsed = 0;
+    u32 i;
     char line[256];
 
     REG_WAITCNT = 0x4317; /* ROM 3/1 wait states, prefetch on */
     stack_paint();
     REG_DEBUG_ENABLE = 0xC0DE;
     sDebug = REG_DEBUG_ENABLE == 0x1DEA;
+#ifdef DEMO_BENCH
+    bench_start();
+    sDebug = 0; /* no debug lines: emulators run the same code as a GBA */
+#endif
 
     REG_DISPCNT = 0x0080; /* forced blank while setting up */
+    /* Video memory holds junk at power-on (emulators zero it): hide all 128
+     * sprites (the HUD and the mannequin only ever write their own slots) and
+     * clear both bitmap pages (the first is shown before it's drawn to) */
+    for (i = 0; i < 128 * 4; i++) OAM[i] = (i & 3) == 0 ? 0x0200 : 0;
+    fill_words((u32 *) 0x06000000, 0, 2 * 0xA000 / 4);
     hud_init();
     mannequin_init();
 
@@ -468,13 +611,20 @@ int main(void) {
     fpsStart = gVBlankCount;
 
     for (;;) {
+#ifdef DEMO_BENCH
+        u32 keys = frame < gBenchFrames ? bench_keys(frame) : 0;
+#else
         u32 keys = ~REG_KEYINPUT & 0x3FF;
+#endif
         u32 pressed = keys & ~prevKeys;
         struct RQuality qv = kQuality[quality];
         const struct RQuality *q = &qv;
         u16 *back = (u16 *) ((REG_DISPCNT & DCNT_PAGE) ? 0x06000000 : 0x0600A000);
         u32 t0, t1, t2, tm, work, vblanks;
         prevKeys = keys;
+#ifdef DEMO_BENCH
+        if (frame == gBenchFrames) bench_done(frame);
+#endif
 
         if (pressed & KEY_START) {
             sLevel = (sLevel + 1) % gNumHarnessLevels;
@@ -541,6 +691,9 @@ int main(void) {
         REG_BG2Y = 0;
         hud_commit();
         mannequin_commit();
+#ifdef DEMO_BENCH
+        bench_record(frame, vblanks, quality, physCycles, renderCycles);
+#endif
 
         /* fps over the last second */
         fpsFlips++;
@@ -602,6 +755,8 @@ int main(void) {
                 /* the camera, to replay a frame's view (src/test/render_check.c) */
                 { 'b', (u32) cam.x }, { 'e', (u32) cam.y }, { 'g', (u32) cam.z },
                 { 'i', cam.yaw }, { 'j', cam.pitch },
+                /* the keys read this frame (demo/keys/bench.keys was made from them) */
+                { 'z', keys },
             };
             u32 k;
             s32 j;

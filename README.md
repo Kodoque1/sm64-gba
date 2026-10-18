@@ -32,7 +32,8 @@ can't be faked:
   frame, against the unmodified decomp, and deliberately broken builds must
   fail the same checks.
 - **The budget is real:** a 16.78 MHz ARM7 with no FPU, 32 KB of fast RAM and
-  256 KB of slow RAM, measured with mGBA's cycle timing.
+  256 KB of slow RAM, measured with mGBA's cycle timing and cross-checked in
+  NanoBoyAdvance, a cycle-accurate emulator.
 
 ## Quick start
 
@@ -79,17 +80,21 @@ make demo                                # rebuilds with the import (NOIMPORT=1:
 make import-check ROM=...                # the import's ROM reading vs the decomp's tools
 
 make render-check                        # the renderer vs a z-buffered reference, around pits
-make demo-logo LOGO_FROM=game.gba        # real hardware: see below
+
+make bench-check                         # the bench ROM in mGBA and NanoBoyAdvance
+make bench-report SAV=sm64bench.sav      # a bench run from a GBA (see "Testing without a GBA")
+make dirty-check                         # the tour with random power-on memory
 ```
 
 The ROM isn't distributed: it contains code and data compiled from the
 decomp, so it's built locally, like the decomp itself.
 
-**Real hardware:** not tested yet, only mGBA. A GBA's BIOS only boots a ROM
-whose header carries the Nintendo logo, which isn't in this repository.
-`make demo` adds it with devkitPro's `gbafix` when that's installed, or
-`make demo-logo LOGO_FROM=game.gba` copies it from the header of a GBA ROM you
-have. Emulators don't need it.
+**Real hardware:** not tested on a GBA yet, only in emulators; see
+[Testing without a GBA](#testing-without-a-gba) for how far that goes. The
+ROM is built for one: `make demo` writes the Nintendo logo a GBA's BIOS
+checks into the header (with devkitPro's gbafix, fetched at build time) and
+checks the header as the BIOS does. If you have a flash cart, the bench ROM
+below is the most useful thing to run.
 
 **Controls:** D-pad = stick, A = A (jump), B = B (punch, dive, kick), R = Z
 (crouch, long jump, ground pound), L + D-pad = rotate and zoom the camera,
@@ -125,6 +130,59 @@ The key script is timed in VBlanks, so when loading gets longer (pit
 detection added ~0.15 s per level) Mario's path through each level shifts a
 little. That, not the pit drawing, took CCM from 98.3% to 96.5%: with the
 pits switched off and the same loading, it measures 97.0%.
+
+### Testing without a GBA
+
+Everything above is measured in mGBA. To get as close to hardware as
+possible without one:
+
+**A second, cycle-accurate emulator.** `make bench-check` runs the bench ROM
+(below) in mGBA and in [NanoBoyAdvance](https://github.com/nba-emu/NanoBoyAdvance),
+which aims for cycle accuracy in the CPU, DMA, timers, video and the
+cartridge prefetch buffer. It's fetched at a pinned revision and built
+headless (`gba/nba/`). NBA needs a BIOS to pass interrupts on; since the demo
+makes no BIOS calls, a stand-in is enough (`gba/nba/mini_bios.s`), and its
+interrupt handler is the official BIOS's own instruction sequence, so it
+costs the same cycles.
+
+```
+                     mGBA      NanoBoyAdvance
+30 fps               99.9%     99.8%    (1227 and 1226 of 1228 frames)
+Mario update         40.3k     41.5k    cycles per frame, mean (+3.0%)
+render               239.7k    242.1k                           (+1.0%)
+level loads          1.3-2.2 s, NBA 0.01-0.05 s longer
+```
+
+Mario's inputs and position are identical on every frame in both, and
+mGBA's run of the first level replays bit for bit through the host
+reference. NBA counts more cycles on every frame compared (Mario's update
++1.2% to +8.6%, rendering +0.1% to +3.2%): mGBA is slightly optimistic for
+this code, not enough to change the frame rate.
+
+**The bench ROM** (`make bench`: `build/demo/sm64bench.gba`) is the demo
+playing the tour by itself, from a key script counted in game frames instead
+of VBlanks, so every platform renders the same scene on the same frame. It
+records every frame (VBlanks, cycle counts, Mario's inputs and a hash of his
+position) in the cartridge's save RAM and shows the frame rate on screen at
+the end. On a flash cart, the save RAM becomes a `.sav` file on the SD card
+(when depends on the cart, often on returning to its menu), and
+`make bench-report SAV=sm64bench.sav` compares it with mGBA's run of the
+same ROM, as `bench-check` does for NBA. Like a GBA, the bench prints
+no debug lines; the tour's 99.3% above includes the time mGBA's debug output
+takes, which is why the bench measures 99.9% in the same emulator.
+
+**Power-on memory.** Emulators start with memory zeroed; a GBA powers on
+with whatever its RAM holds. `make dirty-check` plays the tour with work RAM,
+VRAM, palette and sprite memory filled with random bytes and requires the
+same stats lines and the same pictures on every frame. It found two bugs,
+both fixed: junk sprites on the first loading screen (60 of the 128 sprite
+slots were never written) and junk on screen for two frames when the first
+level appears (a bitmap page was shown before anything was drawn to it).
+
+What still needs a GBA: flash-cart quirks (the demo uses the ROM wait states
+most commercial games use, 3/1 with prefetch) and the screen: an original
+GBA or SP without a backlight is much darker than a monitor, so the dark pits
+may look black.
 
 ### Renderer
 
@@ -510,7 +568,8 @@ ROM).
 
 Requirements (Ubuntu/Debian): `gcc gcc-multilib gcc-arm-none-eabi
 libnewlib-arm-none-eabi qemu-user libmgba-dev python3 git`, plus
-`python3-pil` for `make import-check` and `ffmpeg` for `make demo-video`.
+`python3-pil` for `make import-check`, `ffmpeg` for `make demo-video` and
+`g++ cmake` for `make bench-check`.
 
 ```
 make fetch      # clone the decomp at the pinned revision into ./sm64
@@ -536,8 +595,11 @@ make demo-video     # preview video of the tour
 make skeleton-check # mannequin skeleton vs the game's float matrix chain
 make import ROM=... # convert your ROM's look (see "Importing from your ROM")
 make render-check   # the renderer vs a z-buffered reference, around pits
-make demo-logo LOGO_FROM=... # header logo for real hardware (or install gbafix)
 make import-check   # import's ROM reading vs the decomp's tools (ROM=... for all)
+make bench          # the demo playing its tour, recording to save RAM
+make bench-check    # the bench in mGBA and NanoBoyAdvance (needs g++ and cmake)
+make bench-report SAV=... # a bench .sav from a GBA or another emulator
+make dirty-check    # the tour with random power-on memory, against zeroed
 ```
 
 `OPT_SRCS` in the Makefile lists the files built as ARM into IWRAM; a
@@ -563,14 +625,17 @@ demo/                playable demo: main loop and camera, renderer
                      (render_iw.c: per frame, ARM in IWRAM; render_build.c:
                      mesh at load), animated mannequin (mannequin.c: skeleton,
                      limb ellipses, OAM), sprite HUD, IRQ and fill routines,
-                     key scripts, import.h (layout of the imported data)
+                     key scripts, import.h (layout of the imported data),
+                     bench.h (the bench's save-RAM record)
 src/test/skeleton_check.c  fixed-point skeleton vs the decomp's float matrices
 src/test/render_check.c    the demo's renderer vs a z-buffered reference
 gba/                 crt0, linker scripts (baseline, opt), platform layer,
                      collision profiler, headless mGBA runner
+gba/nba/             headless NanoBoyAdvance runner and its stand-in BIOS
 tools/               input generator, parity runner, GBA runner, profilers
                      (gba_pcprof.py symbolizes the sampling profile), demo
-                     checks (demo_physics_check.py, demo_stats.py), render tables,
+                     checks (demo_physics_check.py, demo_stats.py,
+                     bench_report.py), render tables,
                      skeleton extraction (gen_skeleton.py), ROM import
                      (import_rom.py, n64gfx.py, test_import.py)
 inputs/              7 scripted movement-tech runs + 16 fuzz runs (3,000 frames each)
@@ -621,7 +686,9 @@ derived from the [n64decomp/sm64](https://github.com/n64decomp/sm64)
 decompilation are not covered by it: `src/opt/surface_collision.c`,
 `src/anim.c`, and the snippets marked as copied in `src/stubs.c`,
 `src/levels.c` and `src/test/props.c`. The decomp itself is fetched by
-`make fetch`, not included.
+`make fetch`, not included; so are devkitPro's gbafix (LGPL) and
+NanoBoyAdvance (GPL), fetched into `ext/` when a target needs them. The NBA
+runner links against NanoBoyAdvance, so a built `nba_runner` is under the GPL.
 
 No ROM data is in this repository. Super Mario 64 is Nintendo's; this project
 is not affiliated with or endorsed by Nintendo.

@@ -1,7 +1,8 @@
 @ Minimal GBA startup: ROM header placeholder, stacks, .data/.iwram copy,
 @ .bss clear, then main(). The header is patched by tools/fix_gba_header.py
-@ (title, fixed byte, complement checksum). No Nintendo logo is included;
-@ emulators booting with skipBios don't check it.
+@ (title, fixed byte, complement checksum). No Nintendo logo is included:
+@ emulators booting with skipBios don't check it, and for the demo ROMs
+@ devkitPro's gbafix writes it (see the Makefile).
 
     .section .crt0, "ax"
     .arm
