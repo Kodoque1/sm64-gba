@@ -339,6 +339,8 @@ static void load_level(s32 idx) {
         p = hud_fmt_int(p, gRWallsTrimmed, 1);
         *p++ = ' '; *p++ = 'd'; *p++ = ' ';
         p = hud_fmt_int(p, gRWallsDropped, 1);
+        *p++ = ' '; *p++ = 'p'; *p++ = ' ';
+        p = hud_fmt_int(p, gRMesh.numPits, 1);
         *p = 0;
         debug_line(line);
     }
@@ -597,6 +599,9 @@ int main(void) {
                 { 'd', gRStats.cyclesDraw }, { 'k', gRStats.trisConsidered }, { 'h', gRStats.chunksDrawn },
                 { 'x', gRStats.vertsTransformed }, { 'y', gRStats.clipped }, { 'm', mannequinCycles }, { 'w', stackUsed },
                 { 'n', gRStats.marioTris }, { 'o', gRStats.occluders }, { 'u', gRStats.cyclesMario },
+                /* the camera, to replay a frame's view (src/test/render_check.c) */
+                { 'b', (u32) cam.x }, { 'e', (u32) cam.y }, { 'g', (u32) cam.z },
+                { 'i', cam.yaw }, { 'j', cam.pitch },
             };
             u32 k;
             s32 j;

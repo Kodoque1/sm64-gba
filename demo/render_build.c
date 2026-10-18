@@ -242,6 +242,266 @@ static void finish_chunks(void) {
     }
 }
 
+/* Pits: a floor closed in by walls that rise from all its edges to a rim of
+ * floor behind them, like BoB's cannon shaft (a lid object covers it in the
+ * game; the demo has no objects). With painter's sorting, a pit's far walls
+ * get drawn over the ground in front of its opening. Seen from above its
+ * rim, a pit is only visible through its opening, so render_iw.c clips its
+ * triangles to the projected opening and sorts them at the opening's depth.
+ *
+ * Found in the collision surfaces by exact vertex matches (surfaces share
+ * the level's vertices). Working memory is gRScratch, free once the mesh is
+ * built. */
+#define PIT_HASH 2048        /* bottom edges of rising walls: u16 surface index */
+#define PIT_MAX_FLOORS 128   /* floors with an edge on a rising wall */
+#define sPitHash ((u16 *) gRScratch)
+#define sPitFloor ((u16 *) gRScratch + PIT_HASH)
+#define sPitLabel ((u8 *) (sPitFloor + PIT_MAX_FLOORS)) /* pit label, 0xFF: none */
+
+static u32 point_hash(const s16 *p) {
+    return (u32) (p[0] * 73856093) ^ (u32) (p[1] * 19349663) ^ (u32) (p[2] * 83492791);
+}
+
+static s32 same_point(const s16 *a, const s16 *b) {
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+/* Is (a, b) an edge of wall w with w's third vertex above it? */
+static s32 rises_from(const struct Surface *w, const s16 *a, const s16 *b) {
+    const s16 *v[3] = { w->vertex1, w->vertex2, w->vertex3 };
+    s32 k, hits = 0;
+    const s16 *other = NULL;
+    for (k = 0; k < 3; k++) {
+        if (same_point(v[k], a) || same_point(v[k], b)) {
+            hits++;
+        } else {
+            other = v[k];
+        }
+    }
+    return hits == 2 && other != NULL && other[1] > a[1] && other[1] > b[1];
+}
+
+/* The wall rising from edge (a, b), or NULL. */
+static const struct Surface *rising_wall(const s16 *a, const s16 *b) {
+    u32 h = (point_hash(a) + point_hash(b)) & (PIT_HASH - 1);
+    u16 i;
+    while ((i = sPitHash[h]) != 0xFFFF) {
+        if (rises_from(&sSurfacePool[i], a, b)) {
+            return &sSurfacePool[i];
+        }
+        h = (h + 1) & (PIT_HASH - 1);
+    }
+    return NULL;
+}
+
+/* Another labeled candidate floor with edge (a, b), or -1. */
+static s32 floor_sharing(s32 self, s32 n, const s16 *a, const s16 *b) {
+    s32 j;
+    for (j = 0; j < n; j++) {
+        const struct Surface *g = &sSurfacePool[sPitFloor[j]];
+        const s16 *v[3] = { g->vertex1, g->vertex2, g->vertex3 };
+        s32 k, hits = 0;
+        if (j == self || sPitLabel[j] == 0xFF) continue;
+        for (k = 0; k < 3; k++) {
+            hits += same_point(v[k], a) || same_point(v[k], b);
+        }
+        if (hits == 2) return j;
+    }
+    return -1;
+}
+
+/* Does corner a come before corner b going around the centroid? */
+static s32 corner_before(s32 ax, s32 az, s32 bx, s32 bz) {
+    s32 ha = az < 0 || (az == 0 && ax < 0), hb = bz < 0 || (bz == 0 && bx < 0);
+    if (ha != hb) return ha < hb;
+    return (s64) ax * bz - (s64) az * bx > 0;
+}
+
+/* One pit from the floors labeled `label`: checks its walls reach a rim,
+ * orders its opening, and tags the render triangles inside it. With
+ * `shade`, they're also darkened: lit by the sun like the ground outside,
+ * an open shaft seen from above reads as a bump (BoB's cannon hole looked
+ * like a pyramid), and a hole is in shadow anyway. */
+static void add_pit(s32 label, s32 n, s32 shade) {
+    struct RPit *pit = &gRMesh.pits[gRMesh.numPits];
+    s32 i, k, nc = 0, floorY = 32767, rimY = -32768, cx = 0, cz = 0;
+    s32 minX, maxX, minZ, maxZ;
+    s32 x[4], z[4];
+
+    for (i = 0; i < n; i++) {
+        const struct Surface *s = &sSurfacePool[sPitFloor[i]];
+        const s16 *v[3] = { s->vertex1, s->vertex2, s->vertex3 };
+        if (sPitLabel[i] != label) continue;
+        for (k = 0; k < 3; k++) {
+            const struct Surface *w = rising_wall(v[k], v[k == 2 ? 0 : k + 1]);
+            s32 c;
+            for (c = 0; c < nc; c++) {
+                if (x[c] == v[k][0] && z[c] == v[k][2]) break;
+            }
+            if (c == nc) {
+                if (nc == 4) return; /* only 3- or 4-cornered openings */
+                x[nc] = v[k][0];
+                z[nc] = v[k][2];
+                nc++;
+            }
+            if (v[k][1] < floorY) floorY = v[k][1];
+            if (w != NULL) {
+                /* the wall's top must meet a floor behind it: the rim */
+                struct Surface *rim;
+                s32 top = w->vertex1[1];
+                f32 wx = (w->vertex1[0] + w->vertex2[0] + w->vertex3[0]) / 3.0f;
+                f32 wz = (w->vertex1[2] + w->vertex2[2] + w->vertex3[2]) / 3.0f;
+                f32 h;
+                if (w->vertex2[1] > top) top = w->vertex2[1];
+                if (w->vertex3[1] > top) top = w->vertex3[1];
+                h = find_floor(wx - w->normal.x * 16.0f, (f32) (top + 50), wz - w->normal.z * 16.0f, &rim);
+                if (rim == NULL || h < (f32) (top - 8) || h > (f32) (top + 8)) return;
+                if (top > rimY) rimY = top;
+            }
+        }
+    }
+    if (nc < 3 || rimY <= floorY) return;
+
+    /* corners in order around the centroid; the opening must be convex */
+    for (i = 0; i < nc; i++) {
+        cx += x[i];
+        cz += z[i];
+    }
+    cx /= nc;
+    cz /= nc;
+    for (i = 1; i < nc; i++) {
+        s32 tx = x[i], tz = z[i];
+        for (k = i; k > 0 && corner_before(tx - cx, tz - cz, x[k - 1] - cx, z[k - 1] - cz); k--) {
+            x[k] = x[k - 1];
+            z[k] = z[k - 1];
+        }
+        x[k] = tx;
+        z[k] = tz;
+    }
+    for (i = 0; i < nc; i++) {
+        s32 j = i + 1 == nc ? 0 : i + 1, l = j + 1 == nc ? 0 : j + 1;
+        if ((s64) (x[j] - x[i]) * (z[l] - z[j]) - (s64) (z[j] - z[i]) * (x[l] - x[j]) <= 0) return;
+    }
+
+    minX = maxX = x[0];
+    minZ = maxZ = z[0];
+    for (i = 0; i < nc; i++) {
+        pit->x[i] = (s16) x[i];
+        pit->z[i] = (s16) z[i];
+        if (x[i] < minX) minX = x[i];
+        if (x[i] > maxX) maxX = x[i];
+        if (z[i] < minZ) minZ = z[i];
+        if (z[i] > maxZ) maxZ = z[i];
+    }
+    pit->n = (u8) nc;
+    pit->rimY = (s16) rimY;
+    {
+        s32 mn[3] = { minX, floorY, minZ }, mx[3] = { maxX, rimY, maxZ };
+        struct RChunk tmp;
+        sphere_from_box(&tmp, mn, mx);
+        pit->cx = tmp.cx;
+        pit->cy = tmp.cy;
+        pit->cz = tmp.cz;
+        pit->r = tmp.radius;
+    }
+    gRMesh.numPits++;
+    /* the render triangles inside the pit's box: its walls and floor */
+    for (i = 0; i < gRMesh.numTris; i++) {
+        struct RTri *t = &gRMesh.tris[i];
+        for (k = 0; k < 3; k++) {
+            const struct RVert *rv = &gRMesh.verts[t->v[k]];
+            if (rv->x < minX - 1 || rv->x > maxX + 1 || rv->z < minZ - 1 || rv->z > maxZ + 1
+                || rv->y < floorY - 1 || rv->y > rimY + 1) {
+                break;
+            }
+        }
+        if (k == 3) {
+            t->flags |= (u8) (gRMesh.numPits << R_TRI_PIT_SHIFT);
+            if (shade) {
+                /* color = material * 32 + light * 4: floor black, walls 0..2 */
+                s32 light = (t->color >> 2) & 7;
+                light = t->n[1] > 164 ? 0 : light * 2 / 7;
+                t->color = (u8) ((t->color & 0xE0) | (light << 2));
+            }
+        }
+    }
+}
+
+static void find_pits(s32 shade) {
+    s32 i, k, n = 0, used = 0, changed;
+
+    gRMesh.numPits = 0;
+    for (i = 0; i < PIT_HASH; i++) {
+        sPitHash[i] = 0xFFFF;
+    }
+    /* walls by the edge they rise from */
+    for (i = 0; i < gSurfacesAllocated; i++) {
+        const struct Surface *s = &sSurfacePool[i];
+        const s16 *v[3] = { s->vertex1, s->vertex2, s->vertex3 };
+        if (surface_hidden(s->type) || s->normal.y > 0.01f || s->normal.y < -0.01f) continue;
+        for (k = 0; k < 3; k++) {
+            const s16 *a = v[k], *b = v[k == 2 ? 0 : k + 1], *c = v[k == 0 ? 2 : k - 1];
+            if (c[1] > a[1] && c[1] > b[1]) {
+                u32 h = (point_hash(a) + point_hash(b)) & (PIT_HASH - 1);
+                if (++used > PIT_HASH / 2) return; /* table too full: no pits */
+                while (sPitHash[h] != 0xFFFF) {
+                    h = (h + 1) & (PIT_HASH - 1);
+                }
+                sPitHash[h] = (u16) i;
+            }
+        }
+    }
+    /* candidate floors: an edge on a rising wall */
+    for (i = 0; i < gSurfacesAllocated && n < PIT_MAX_FLOORS; i++) {
+        const struct Surface *s = &sSurfacePool[i];
+        const s16 *v[3] = { s->vertex1, s->vertex2, s->vertex3 };
+        if (surface_hidden(s->type) || s->normal.y <= 0.01f) continue;
+        for (k = 0; k < 3; k++) {
+            if (rising_wall(v[k], v[k == 2 ? 0 : k + 1]) != NULL) {
+                sPitFloor[n] = (u16) i;
+                sPitLabel[n] = (u8) n;
+                n++;
+                break;
+            }
+        }
+    }
+    /* Keep the floors whose every edge is on a rising wall or shared with
+     * another kept floor; floors sharing edges end up with the same label. */
+    do {
+        changed = 0;
+        for (i = 0; i < n; i++) {
+            const struct Surface *s = &sSurfacePool[sPitFloor[i]];
+            const s16 *v[3] = { s->vertex1, s->vertex2, s->vertex3 };
+            if (sPitLabel[i] == 0xFF) continue;
+            for (k = 0; k < 3; k++) {
+                const s16 *a = v[k], *b = v[k == 2 ? 0 : k + 1];
+                s32 j;
+                if (rising_wall(a, b) != NULL) continue;
+                j = floor_sharing(i, n, a, b);
+                if (j < 0) {
+                    sPitLabel[i] = 0xFF;
+                    changed = 1;
+                    break;
+                }
+                if (sPitLabel[j] != sPitLabel[i]) {
+                    u8 lo = sPitLabel[j] < sPitLabel[i] ? sPitLabel[j] : sPitLabel[i];
+                    sPitLabel[i] = sPitLabel[j] = lo;
+                    changed = 1;
+                }
+            }
+        }
+    } while (changed);
+
+    for (i = 0; i < n && gRMesh.numPits < R_MAX_PITS; i++) {
+        for (k = 0; k < n; k++) {
+            if (sPitLabel[k] == i) break;
+        }
+        if (k < n) {
+            add_pit(i, n, shade);
+        }
+    }
+}
+
 void render_build_level(const struct RLevelStyle *style, s32 terrainType) {
     s32 i, k, n = 0;
     u16 count[R_MAX_CHUNKS];
@@ -332,6 +592,7 @@ void render_build_level(const struct RLevelStyle *style, s32 terrainType) {
     gRWallsDropped = sWallsDropped;
 
     finish_chunks();
+    find_pits(1);
 }
 
 /* Palette: materials x light x fog, sky gradient, player colors. */
@@ -453,6 +714,7 @@ void render_build_imported(const struct ImpLevel *lv) {
     }
     gRMesh.numTris = (u16) n;
     finish_chunks();
+    find_pits(0); /* the import's colors come from the ROM */
 }
 
 void render_set_imported_palette(const struct ImpLevel *lv) {

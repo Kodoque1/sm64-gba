@@ -28,5 +28,7 @@ jobs:
         run: make skeleton-check
       - name: Demo physics vs reference, frame-rate tour
         run: make demo demo-check
+      - name: Renderer vs a z-buffered reference, around pits
+        run: make render-check
       - name: ROM import readers vs the decomp's tools
         run: make import-check

@@ -77,10 +77,19 @@ make skeleton-check          # animated figure vs the game's float matrix chain
 make import ROM=path/to/your/sm64.z64   # optional: real Mario model and level meshes
 make demo                                # rebuilds with the import (NOIMPORT=1: without)
 make import-check ROM=...                # the import's ROM reading vs the decomp's tools
+
+make render-check                        # the renderer vs a z-buffered reference, around pits
+make demo-logo LOGO_FROM=game.gba        # real hardware: see below
 ```
 
 The ROM isn't distributed: it contains code and data compiled from the
 decomp, so it's built locally, like the decomp itself.
+
+**Real hardware:** not tested yet, only mGBA. A GBA's BIOS only boots a ROM
+whose header carries the Nintendo logo, which isn't in this repository.
+`make demo` adds it with devkitPro's `gbafix` when that's installed, or
+`make demo-logo LOGO_FROM=game.gba` copies it from the header of a GBA ROM you
+have. Emulators don't need it.
 
 **Controls:** D-pad = stick, A = A (jump), B = B (punch, dive, kick), R = Z
 (crouch, long jump, ground pound), L + D-pad = rotate and zoom the camera,
@@ -94,7 +103,7 @@ optimized objects as `make gba-opt-test`, at SM64's native 30 Hz, fed by the
 same per-frame sequence as the parity harness. `make demo-check` proves it on
 the real ROM: the demo logs the exact controller inputs it gives Mario each
 frame (stick, buttons, camera yaw), the host reference harness replays them,
-and Mario's position matches **bit for bit on every frame** (689 frames of
+and Mario's position matches **bit for bit on every frame** (683 frames of
 running, jumps, long jumps, dives, slide kicks, ground pounds and camera
 turns). A 32-unit change to a single camera yaw makes it fail at that frame.
 
@@ -103,14 +112,19 @@ What you see is the level's real collision mesh, the geometry Mario walks on.
 ### Performance (mGBA, `make demo-check` tour of all four levels)
 
 ```
-1246 game frames: 99.7% at 30 fps (4 frames took 3 VBlanks)
+1228 game frames: 99.3% at 30 fps (8 frames took 3 VBlanks)
   bob     100.0% at 30 fps, quality step 0 only
   wf      100.0% at 30 fps, quality step 0 only
-  ccm      98.3% at 30 fps, quality steps 0-2
+  ccm      96.5% at 30 fps, quality steps 0-2
   bitdw   100.0% at 30 fps, quality step 0 only
-  render: mean 220k cycles at step 0 (of a 562k-cycle 30 Hz frame)
+  render: mean 219k cycles at step 0 (of a 562k-cycle 30 Hz frame)
   Mario physics: mean 40k cycles; animated figure: mean 43k cycles
 ```
+
+The key script is timed in VBlanks, so when loading gets longer (pit
+detection added ~0.15 s per level) Mario's path through each level shifts a
+little. That, not the pit drawing, took CCM from 98.3% to 96.5%: with the
+pits switched off and the same loading, it measures 97.0%.
 
 ### Renderer
 
@@ -128,6 +142,27 @@ can change per frame for free. Per frame:
 6. A scanline triangle rasterizer writing straight to VRAM, with spans filled
    by an 8-register `stmia` burst routine; reciprocal tables in ROM instead
    of division.
+
+**Pits.** The collision mesh has 11 pits in these levels: BoB's cannon shaft
+and the like, which the game covers with objects (a lid, the cannon) that the
+demo doesn't have. Lit by the sun like the ground around it, the open cannon
+shaft seen from above read as a pyramid sticking out of the grass, and from
+some angles painter's sorting drew parts of a pit over the ground in front of
+its opening, or the other way around. At load, `render_build.c` finds them:
+floors whose every edge is the bottom of a wall rising to a rim of floor
+behind it (6 in BoB, 1 in WF, 4 in CCM). Their insides are shaded dark, and
+seen from above the rim, where a pit can only be seen through its opening,
+their triangles are clipped on screen to the projected opening and sorted at
+the opening's depth. That code runs rarely, so it's Thumb code in ROM
+(section `.text_rom`): IWRAM use is 24 bytes lower than before in the default
+build, 192 bytes higher with an import.
+
+`make render-check` runs the renderer on the host against a z-buffered
+reference of the same mesh, from 4,686 views around the pits (open air, the
+opening in sight). With the pit handling: 18 pixels of pit drawn over
+something in front of it and 2,618 pixels of visible pit missing (thin
+slivers at grazing angles). Without it, which the check requires to fail:
+13,109 and 15,890.
 
 Hot code (renderer, collision, libgcc float routines) runs as ARM code from
 IWRAM. Flat shading with baked sun lighting (8 levels) and 4 fog levels per
@@ -212,8 +247,8 @@ The default build draws the collision mesh and a neutral mannequin. Like
   `ROM=` the synthetic checks still run.
 - **Cost.** Mario's model takes ~150k cycles a frame (the mannequin: 43k),
   memory-bound: his mesh is read from ROM and his per-frame arrays live in
-  EWRAM, since IWRAM has no room left beyond the stack (high-water 1.7 KB of
-  2.5 KB). The tour holds 30 fps on 98% of frames (BoB 98.9%, WF 98.3%, CCM
+  EWRAM, since IWRAM has no room left beyond the stack (2.3 KB; high-water
+  1.9 KB, reached while a level loads, measured with a stand-in import). The tour holds 30 fps on 98% of frames (BoB 98.9%, WF 98.3%, CCM
   92.8%, BitDW 99.7%), with the governor lowering resolution where needed.
   Physics stays bit-identical to the reference (`make demo-check`).
 
@@ -234,7 +269,8 @@ deliberately; physics was never touched:
   trimmed at load time using the game's own `find_floor`, so painter's
   sorting doesn't draw them over the floor. Pinholes from T-junctions in the
   collision mesh are hidden by filling the background below the horizon with
-  ground color.
+  ground color. Pits the game covers with objects (BoB's cannon shaft) are
+  open holes, shaded dark (see "Pits" above).
 - **Adaptive quality:** a governor drops one step the moment a frame goes
   over budget and climbs back after 1.5 s with 35% headroom. Steps: 160x106 at
   8000 units, 160x106 at 6000, 144x96 at 5000, 128x85 at 4200, 112x74 at
@@ -252,10 +288,10 @@ deliberately; physics was never touched:
   deaths respawn Mario at the level start.
 - **Memory:** the surface pools are sized for these four levels (frees ~70
   KB), and `mario_step.c` runs from ROM in the demo (its IWRAM is worth more
-  as stack). IWRAM: 28.7 KB used, 3.2 KB for the stack (measured high-water
-  mark over the full tour: 1.6 KB). EWRAM: 252 KB of 256 KB.
+  as stack). IWRAM: 27.6 KB used, 4.1 KB for the stack (measured high-water
+  mark: 1.8 KB, reached while a level loads). EWRAM: 247.9 KB of 256 KB.
 - **Loading:** about 2 s per level (collision load, cache build, mesh build
-  with wall trimming), shown as a loading screen.
+  with wall trimming, pit detection), shown as a loading screen.
 
 ## What it does
 
@@ -499,6 +535,8 @@ make demo-check     # demo physics vs reference + frame-rate tour
 make demo-video     # preview video of the tour
 make skeleton-check # mannequin skeleton vs the game's float matrix chain
 make import ROM=... # convert your ROM's look (see "Importing from your ROM")
+make render-check   # the renderer vs a z-buffered reference, around pits
+make demo-logo LOGO_FROM=... # header logo for real hardware (or install gbafix)
 make import-check   # import's ROM reading vs the decomp's tools (ROM=... for all)
 ```
 
@@ -527,6 +565,7 @@ demo/                playable demo: main loop and camera, renderer
                      limb ellipses, OAM), sprite HUD, IRQ and fill routines,
                      key scripts, import.h (layout of the imported data)
 src/test/skeleton_check.c  fixed-point skeleton vs the decomp's float matrices
+src/test/render_check.c    the demo's renderer vs a z-buffered reference
 gba/                 crt0, linker scripts (baseline, opt), platform layer,
                      collision profiler, headless mGBA runner
 tools/               input generator, parity runner, GBA runner, profilers

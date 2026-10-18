@@ -357,11 +357,147 @@ static s32 clip_and_project(s32 (*buf)[3], s32 n, u32 planes, s32 *outN) {
  * imported model is drawn this frame. */
 static s32 sMX IWRAM_DATA, sMY IWRAM_DATA, sMZ IWRAM_DATA, sMarioOn IWRAM_DATA, sNumOcc IWRAM_DATA;
 
+/* ---------- pits ----------
+ * Seen from above its rim, a pit (render_build.c) is only visible through
+ * its opening: its triangles are clipped to the projected opening and sorted
+ * at the opening's depth, so the ground around it and whatever is behind it
+ * keep their order. Rare work, so it runs from ROM as Thumb code
+ * (.text_rom, gba/gba_opt.ld). */
+#ifdef __arm__
+#define ROM_CODE __attribute__((section(".text_rom"), long_call, noinline, target("thumb")))
+#else
+#define ROM_CODE /* host build (src/test/render_check.c) */
+#endif
+enum { PIT_NORMAL, PIT_PORTAL };
+static u8 sPitMode[R_MAX_PITS];
+static s16 sPitXY[R_MAX_PITS][8];
+static s32 sPitDepth[R_MAX_PITS];
+
+static inline s32 sphere_visible(s32 x, s32 y, s32 z, s32 r);
+
+ROM_CODE static void pits_frame(void) {
+    u32 p, k;
+    for (p = 0; p < gRMesh.numPits; p++) {
+        const struct RPit *pit = &gRMesh.pits[p];
+        s32 depth = 0;
+        u32 oc = 0;
+        sPitMode[p] = PIT_NORMAL;
+        /* off screen: its triangles are culled anyway; below the rim: the
+         * pit may stand above the ground around it, sort it normally */
+        if (sCamY <= pit->rimY || !sphere_visible(pit->cx, pit->cy, pit->cz, pit->r)) continue;
+        for (k = 0; k < pit->n; k++) {
+            s32 c[3];
+            to_camera(pit->x[k], pit->rimY, pit->z[k], c);
+            oc |= outcode(c[0], c[1], c[2]);
+            depth += c[2];
+            if (!(oc & (OC_NEAR | OC_GUARD))) {
+                project(c[0], c[1], c[2], &sPitXY[p][2 * k], &sPitXY[p][2 * k + 1]);
+            }
+        }
+        if (!(oc & (OC_NEAR | OC_GUARD))) { /* otherwise: plain sorting */
+            sPitMode[p] = PIT_PORTAL;
+            sPitDepth[p] = depth * 3 / (s32) pit->n;
+        }
+    }
+}
+
+/* Clip a screen polygon (1/16 pixels) to a convex one; returns the count.
+ * Everything here is inside the guard band (|coordinate| < 15000), so the
+ * edge functions fit in 32 bits. */
+ROM_CODE static s32 clip_to_opening(const s16 *in, s32 n, const s16 *q, s32 nq, s16 *out) {
+    static s16 buf[2][2 * (CLIP_MAX + 4)]; /* EWRAM, not the IWRAM stack */
+    const s16 *src = in;
+    s32 e, i, area = 0;
+    for (i = 0; i < nq; i++) {
+        s32 j = i + 1 == nq ? 0 : i + 1;
+        area += q[2 * i] * q[2 * j + 1] - q[2 * j] * q[2 * i + 1];
+    }
+    for (e = 0; e < nq; e++) {
+        s32 j = e + 1 == nq ? 0 : e + 1, m = 0;
+        s32 ex = q[2 * j] - q[2 * e], ey = q[2 * j + 1] - q[2 * e + 1];
+        s16 *dst = e == nq - 1 ? out : buf[e & 1];
+        if (area < 0) {
+            ex = -ex;
+            ey = -ey;
+        }
+        for (i = 0; i < n; i++) {
+            const s16 *p0 = &src[2 * i], *p1 = &src[2 * (i + 1 == n ? 0 : i + 1)];
+            s32 d0 = ex * (p0[1] - q[2 * e + 1]) - ey * (p0[0] - q[2 * e]);
+            s32 d1 = ex * (p1[1] - q[2 * e + 1]) - ey * (p1[0] - q[2 * e]);
+            if (d0 >= 0) {
+                dst[2 * m] = p0[0];
+                dst[2 * m + 1] = p0[1];
+                m++;
+            }
+            if ((d0 >= 0) != (d1 >= 0)) {
+                /* t = d0 / (d0 - d1) in Q15, from the reciprocal table
+                 * (num <= den, so num * 2^30 / den fits) */
+                u32 num = d0 >= 0 ? (u32) d0 : (u32) -d0;
+                u32 den = num + (d1 >= 0 ? (u32) d1 : (u32) -d1);
+                s32 t;
+                while (den >= 32768) {
+                    num >>= 1;
+                    den >>= 1;
+                }
+                t = den != 0 ? (s32) ((num * gRecipClip[den]) >> 15) : 0;
+                dst[2 * m] = (s16) (p0[0] + (((p1[0] - p0[0]) * t) >> 15));
+                dst[2 * m + 1] = (s16) (p0[1] + (((p1[1] - p0[1]) * t) >> 15));
+                m++;
+            }
+        }
+        if (m < 3) return 0;
+        n = m;
+        src = dst;
+    }
+    return n;
+}
+
+/* A pit triangle seen through the pit's opening. */
+ROM_CODE static void pit_triangle(const struct RTri *t, u32 p, u32 occ) {
+    u32 a = t->v[0], b = t->v[1], c = t->v[2], ocOr;
+    s16 xy[6];
+    const s16 *src = xy;
+    s32 n = 3, m;
+
+    if (sStamp[a] != sFrame) vertex(a);
+    if (sStamp[b] != sFrame) vertex(b);
+    if (sStamp[c] != sFrame) vertex(c);
+    if (sOC[a] & sOC[b] & sOC[c]) return;
+    gRStats.trisDrawn++;
+    ocOr = clip_planes(sOC[a] | sOC[b] | sOC[c]);
+    if (!ocOr) {
+        xy[0] = sSX[a]; xy[1] = sSY[a];
+        xy[2] = sSX[b]; xy[3] = sSY[b];
+        xy[4] = sSX[c]; xy[5] = sSY[c];
+    } else {
+        static s32 buf[CLIP_MAX][3]; /* EWRAM, not the IWRAM stack */
+        s32 base;
+        buf[0][0] = sVX[a]; buf[0][1] = sVY[a]; buf[0][2] = sVZ[a];
+        buf[1][0] = sVX[b]; buf[1][1] = sVY[b]; buf[1][2] = sVZ[b];
+        buf[2][0] = sVX[c]; buf[2][1] = sVY[c]; buf[2][2] = sVZ[c];
+        base = clip_and_project(buf, 3, ocOr, &n);
+        if (base < 0) return;
+        src = &sClip[2 * base];
+    }
+    if (sClipUsed + CLIP_MAX + 4 > R_MAX_CLIPVERTS) return;
+    m = clip_to_opening(src, n, sPitXY[p], gRMesh.pits[p].n, &sClip[2 * sClipUsed]);
+    if (m < 3) return;
+#ifdef DEMO_IMPORTED
+    if (occ) sNumOcc++;
+#endif
+    queue(t->color + fog_level(sVZ[a] + sVZ[b] + sVZ[c]), m | occ, sClipUsed, sPitDepth[p]);
+    sClipUsed += m;
+}
+
 static void level_triangle(u32 ti, u32 occ) {
     const struct RTri *t = &gRMesh.tris[ti];
-    u32 a = t->v[0], b = t->v[1], c = t->v[2], ocAnd, ocOr;
+    u32 a = t->v[0], b = t->v[1], c = t->v[2], ocAnd, ocOr, pit = t->flags >> R_TRI_PIT_SHIFT;
     s32 depth;
 
+    if (pit && sPitMode[pit - 1] == PIT_PORTAL) {
+        pit_triangle(t, pit - 1, occ);
+        return;
+    }
     if (sStamp[a] != sFrame) vertex(a);
     if (sStamp[b] != sFrame) vertex(b);
     if (sStamp[c] != sFrame) vertex(c);
@@ -746,6 +882,9 @@ void render_frame(u16 *page, const struct RCamera *cam, const struct RPlayer *pl
     sMX = player->x;
     sMY = player->y + 80; /* body center: Mario is ~160 units tall */
     sMZ = player->z;
+    if (gRMesh.numPits) {
+        pits_frame();
+    }
     t0 = cycles();
 
     /* Background: sky gradient above the horizon, the level's ground color

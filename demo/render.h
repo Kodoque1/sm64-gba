@@ -14,6 +14,7 @@
 #define R_MAX_POLYS 1200    /* polygons queued per frame */
 #define R_MAX_CLIPVERTS 1600
 #define R_NUM_BUCKETS 256
+#define R_MAX_PITS 8
 #define R_MAX_W 160
 #define R_MAX_H 108
 
@@ -41,6 +42,7 @@ struct RTri {
 
 #define R_TRI_DECAL 1   /* drawn as if nearer: decals lie on other triangles */
 #define R_TRI_DOUBLE 2  /* no backface culling */
+#define R_TRI_PIT_SHIFT 4 /* flags bits 4-7: index + 1 of the pit the triangle is in */
 
 struct RChunk {
     s16 cx, cy, cz; /* bounding sphere; radius < 0: empty */
@@ -48,12 +50,22 @@ struct RChunk {
     u16 first, count;
 };
 
+/* A pit (render_build.c): a floor closed in by walls that rise from its
+ * edges to a rim of floor. Its opening is a convex polygon at the rim. */
+struct RPit {
+    s16 x[4], z[4]; /* opening corners, in order around it */
+    s16 rimY;
+    s16 cx, cy, cz, r; /* bounding sphere */
+    u8 n;           /* 3 or 4 corners */
+};
+
 struct RMesh {
     struct RVert verts[R_MAX_VERTS];
     struct RTri tris[R_MAX_TRIS];
     struct RChunk chunks[R_MAX_CHUNKS];  /* index = parent * 4 + child */
     struct RChunk supers[R_MAX_SUPERS];  /* parents: spheres around 4 chunks */
-    u16 numVerts, numTris, numChunks;
+    struct RPit pits[R_MAX_PITS];
+    u16 numVerts, numTris, numChunks, numPits;
 };
 
 /* A level's look: material colors and sky. */

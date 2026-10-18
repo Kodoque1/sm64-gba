@@ -4,7 +4,8 @@
  *   - libgcc's single-precision soft-float routines (hand-written ARM code,
  *     which runs at half speed or worse from the 16-bit cartridge bus)
  *   - newlib's sqrtf (ARM code, bit-by-bit square root: ~4% of Mario's time
- *     when run from cartridge ROM). */
+ *     when run from cartridge ROM).
+ * Rarely run functions of *_iw.o files can stay in ROM: section .text_rom. */
 OUTPUT_FORMAT("elf32-littlearm")
 OUTPUT_ARCH(arm)
 ENTRY(_start)
@@ -22,6 +23,7 @@ SECTIONS {
     .text : {
         KEEP(*(.crt0))
         *(EXCLUDE_FILE(*_iw.o *libgcc.a:_arm_addsubsf3.o *libgcc.a:_arm_muldivsf3.o *libgcc.a:_arm_cmpsf2.o *libgcc.a:_arm_fixsfsi.o *libgcc.a:_arm_unordsf2.o *libm.a:libm_a-ef_sqrt.o *libm.a:libm_a-wf_sqrt.o) .text EXCLUDE_FILE(*_iw.o *libgcc.a:_arm_addsubsf3.o *libgcc.a:_arm_muldivsf3.o *libgcc.a:_arm_cmpsf2.o *libgcc.a:_arm_fixsfsi.o *libgcc.a:_arm_unordsf2.o *libm.a:libm_a-ef_sqrt.o *libm.a:libm_a-wf_sqrt.o) .text.*)
+        *(.text_rom)
         *(.glue_7 .glue_7t .vfp11_veneer .v4_bx)
     } > rom
 

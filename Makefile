@@ -61,7 +61,7 @@ ARM_OBJS  := $(addprefix build/arm/,$(notdir $(DECOMP_SRCS:.c=.o) $(OUR_SRCS:.c=
 
 vpath %.c $(SM64)/src/game $(SM64)/src/engine src build
 
-.PHONY: all fetch test profile controls gba gba-test opt-test gba-opt-test gba-prof props props-arm equiv equiv-arm gba-pcprof demo demo-check demo-video skeleton-check import unimport import-check clean inputs
+.PHONY: all fetch test profile controls gba gba-test opt-test gba-opt-test gba-prof props props-arm equiv equiv-arm gba-pcprof demo demo-logo demo-check demo-video skeleton-check render-check import unimport import-check clean inputs
 .SECONDARY:
 
 all: build/host/harness build/arm/harness
@@ -433,12 +433,24 @@ build/demo/sm64demo.elf: build/gba/crt0.o $(DEMO_CORE) $(DEMO_OBJS) gba/gba_opt.
 	$(ARM_CC) $(subst gba/gba.ld,gba/gba_opt.ld,$(GBA_LDFLAGS)) build/gba/crt0.o $(DEMO_CORE) \
 	    $(DEMO_OBJS) -lm -lc -lgcc $(DEMO_LDWRAP) -Wl,-Map,$@.map -o $@
 
+# Real hardware: the BIOS only boots a ROM whose header has the Nintendo
+# logo, which isn't in this repository. devkitPro's gbafix adds it (used when
+# it's installed), or `make demo-logo LOGO_FROM=game.gba` copies it from the
+# header of a GBA ROM you have. Emulators don't need it.
+GBAFIX ?= $(shell command -v gbafix 2>/dev/null)
+
 build/demo/sm64demo.gba: build/demo/sm64demo.elf tools/fix_gba_header.py
 	arm-none-eabi-objcopy -O binary $< $@
 	$(PYTHON) tools/fix_gba_header.py $@ SM64DEMAKE
+	$(if $(GBAFIX),$(GBAFIX) $@ > /dev/null)
 
 demo: build/demo/sm64demo.gba
 	@grep -E "__iwram_end|__bss_end" build/demo/sm64demo.elf.map | awk '{print "  " $$1 " " $$2}'
+	@$(if $(GBAFIX),echo "  header logo added by gbafix",echo "  no header logo (fine for emulators; for a GBA: gbafix, or make demo-logo LOGO_FROM=...)")
+
+demo-logo: build/demo/sm64demo.gba
+	@test -n "$(LOGO_FROM)" || { echo "usage: make demo-logo LOGO_FROM=path/to/a/gba/rom.gba"; exit 1; }
+	$(PYTHON) tools/fix_gba_header.py $< SM64DEMAKE --logo-from "$(LOGO_FROM)"
 
 # Plays the demo in mGBA: (1) the physics check replays the inputs the demo
 # fed Mario through the host reference and compares his position every frame,
@@ -461,6 +473,20 @@ build/host/skeleton_check: src/test/skeleton_check.c demo/mannequin.c build/demo
 
 skeleton-check: build/host/skeleton_check
 	./build/host/skeleton_check
+
+# The demo's renderer run on the host against a z-buffered reference, from
+# views all around every pit (src/test/render_check.c).
+build/host/render_check: src/test/render_check.c demo/render_iw.c demo/render_build.c demo/render.h \
+                         build/demo/render_tables.c $(filter-out build/host/harness.o,$(HOST_OBJS))
+	$(HOST_CC) $(HOST_ARCH) $(CORE_CFLAGS) -Idemo -c src/test/render_check.c -o build/host/render_check.o
+	$(HOST_CC) $(HOST_ARCH) $(CORE_CFLAGS) -Idemo -c demo/render_build.c -o build/host/render_build.o
+	$(HOST_CC) $(HOST_ARCH) $(DEMO_CFLAGS) -c demo/render_iw.c -o build/host/render_iw.o
+	$(HOST_CC) $(HOST_ARCH) -O2 -c build/demo/render_tables.c -o build/host/render_tables.o
+	$(HOST_CC) $(HOST_ARCH) build/host/render_check.o build/host/render_build.o build/host/render_iw.o \
+	    build/host/render_tables.o $(filter-out build/host/harness.o,$(HOST_OBJS)) -lm -o $@
+
+render-check: build/host/render_check
+	./build/host/render_check
 
 # Preview video of the tour (needs ffmpeg).
 demo-video: build/demo/sm64demo.gba build/mgba_runner
